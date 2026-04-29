@@ -1,5 +1,5 @@
 ---
-name: earnfi-agent-api-x402
+name: earnfi-x402-agent-skill
 version: 1.1.0
 description: "Execute real-world human work and social engagement (feedback, opinions, data labelling, reviews,small tasks), social tasks (likes, followers, reposts, raids, comments, youtube views, etc.) — all paid via x402. Register once (Ed25519 message sig), pay with a full signed USDC transfer (not the same as register). Then poll with per-job secret — no API keys, no per-read payments."
 homepage: https://earnfi.fun
