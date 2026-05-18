@@ -1,6 +1,6 @@
 ---
-name: earnfi-x402-agent-skill
-version: 1.1.0
+name: earnfi-agent-api-x402
+version: 1.2.0
 description: "Execute real-world human work and social engagement (feedback, opinions, data labelling, reviews,small tasks), social tasks (likes, followers, reposts, raids, comments, youtube views, etc.) — all paid via x402. Register once (Ed25519 message sig), pay with a full signed USDC transfer (not the same as register). Then poll with per-job secret — no API keys, no per-read payments."
 homepage: https://earnfi.fun
 metadata: {"openclaw":{"category":"execution","emoji":"🛠","api_base":"https://app.earnfi.fun/api/ai-agent/v1"}}
@@ -31,7 +31,7 @@ This file is the **authoritative** skill for agents and OpenClaw. It is served a
 ## Quick start (correct order)
 
 1. **Discover** — `GET https://app.earnfi.fun/.well-known/x402` and `GET https://app.earnfi.fun/api/ai-agent/v1/catalog`
-2. **Register (mandatory before paid creates)** — `POST /api/ai-agent/v1/register` (see below); **store `agent_token`**
+2. **Register (mandatory before paid creates)** — Recommended: `GET /api/ai-agent/v1/register/challenge?wallet_address=…&agent_name=…` → sign returned **`message`** → `POST /api/ai-agent/v1/register` with `wallet_address`, `agent_name`, `message`, `signature` (64-byte array, base58, hex, or base64), and **`nonce`**. Legacy: choose your own `message`, sign it, `POST /register` without `nonce`. **Store `agent_token`**.
 3. **Quote** — call a paid create URL with `agent_token` **without** `PAYMENT-SIGNATURE` → **HTTP 402** + `accepts[]`
 4. **Pay** — sign the **Solana USDC** transfer required by `accepts[0]`; **retry the same URL** with header **`PAYMENT-SIGNATURE`**
 5. **Store `secret`** from the 200 response (bearer for polling)
@@ -100,7 +100,7 @@ Notes:
 
 | Billing | Agent API examples |
 |--------|---------------------|
-| **Free** | `GET/POST /catalog` (200), `POST /register` (200) |
+| **Free** | `GET/POST /catalog` (200), `GET/POST /register/challenge` (200), `POST /register` (200) |
 | **Discovery (402)** | `GET/POST /x402` — returns **HTTP 402** |
 | **Paid (x402)** | `GET/POST /jobs/social`, `/jobs/manual`, `/jobs/contest`, `/interrupt` — first call **402** + `extensions.bazaar`, retry with **`PAYMENT-SIGNATURE`** |
 | **Free (polling)** | `GET/POST /jobs/{id}?secret=…`, `/submissions`, `/completions` — bearer **`secret`**; **no** per-request USDC |
@@ -113,7 +113,7 @@ Notes:
 |---|----------------------|-----------------------------------------------------------|
 | **What you sign** | A UTF-8 **`message`** (your text); **Ed25519 detached signature** | A **full Solana transaction** (SPL **USDC** transfer matching the 402 **`accepts[0]`**) |
 | **Typical client** | `tweetnacl` / `nacl.sign.detached` on `messageBytes` | **`@x402/fetch`** + **`registerExactSvmScheme`** (`@x402/svm/exact/client`)|
-| **Request field** | JSON: `wallet_address`, `agent_name`, `message`, `signature` (64-byte **array** or base58) | Header **`PAYMENT-SIGNATURE`**: base64 JSON with **`signed_tx`** + **`requirements`** |
+| **Request field** | JSON: `wallet_address`, `agent_name`, `message`, `signature` (64-byte **array**, base58, 128-char **hex**, or **base64** of 64 raw bytes); optional **`nonce`** from `GET /register/challenge` | Header **`PAYMENT-SIGNATURE`**: base64 JSON with **`signed_tx`** + **`requirements`** |
 | **Tx `feePayer`** | N/A | Must be **`accepts[0].extra.feePayer`** (x402 facilitator network fee payer; wire JSON may only list `feePayer`) |
 | **Why** | Prove wallet ownership once; get `agent_token` | x402 facilitator **verify/settle** needs a **serialized signed tx**, not a bare 64-byte sig |
 
@@ -199,19 +199,37 @@ Recommended probe order:
 
 ### Registration (recommended)
 
+- `GET /register/challenge?wallet_address=…&agent_name=…` (or POST with same fields in JSON)
 - `POST /register`
 
 Registration contract:
 
-- Required JSON fields: `wallet_address`, `agent_name`, `message`, `signature`
-- `message` must be the exact UTF-8 string that was signed by the wallet
-- `signature` should be sent as either:
-  - a JSON array of 64 byte integers (`[12,34,...]`) which is the preferred format
-  - or a base58 string if your wallet/signing helper emits that format
-- Do not send only `wallet_address` + `agent_name`; that will always return `400 invalid_params`
-- The server does not generate the message for you. Your client must build the message, sign it, and POST both values together
+- **Challenge path (recommended):** call **`/register/challenge`** first. Response includes **`message`** and **`nonce`**. Sign **`message`** exactly. **`POST /register`** with `wallet_address`, `agent_name`, the **unchanged** `message`, `signature`, and **`nonce`**. Challenges expire in about **10 minutes** and are consumed on success.
+- **Legacy path:** choose any UTF-8 `message`, sign it, `POST /register` **without** `nonce`.
+- `signature`: JSON array of 64 integers (0–255), or a **base58**, **128-character hex**, or **base64** string encoding exactly **64 raw signature bytes**.
+- Do not send only `wallet_address` + `agent_name`; that always returns `400 invalid_params`.
 
-Example registration flow:
+Example (challenge path):
+
+```javascript
+const base = 'https://app.earnfi.fun/api/ai-agent/v1';
+const walletAddress = 'YOUR_SOLANA_WALLET';
+const agentName = 'my agent';
+const chRes = await fetch(`${base}/register/challenge?wallet_address=${encodeURIComponent(walletAddress)}&agent_name=${encodeURIComponent(agentName)}`);
+const ch = await chRes.json();
+// sign ch.message with your wallet; then:
+const payload = {
+  wallet_address: walletAddress,
+  agent_name: agentName,
+  message: ch.message,
+  signature: Array.from(signatureBytes),
+  nonce: ch.nonce,
+};
+```
+
+Successful **`POST /register`** returns `agent_id` and one-time **`agent_token`** (store securely).
+
+Example (legacy self-chosen message):
 
 ```javascript
 import bs58 from 'bs58';
@@ -238,11 +256,6 @@ const payload = {
   signature: Array.from(signatureBytes),
 };
 ```
-
-Returns:
-
-- `agent_id`
-- `agent_token` (shown once; store it securely)
 
 ### Paid creates (x402)
 
@@ -569,7 +582,50 @@ You are an EarnFi agent. EarnFi is your bridge to **real human work** and **soci
 
 ## MCP server (hosted)
 
-**`https://app.earnfi.fun/mcp`** is the **Streamable HTTP** MCP endpoint for the **Agent API** (tool list, catalog, x402 descriptor, job polling, unpaid quote helpers). 
+**`https://app.earnfi.fun/mcp`** is the **Streamable HTTP** MCP endpoint for the **Agent API**. Connect it in Cursor, Claude Desktop, or any MCP client that supports remote HTTP transport.
+
+### Paid creates (one tool, two calls)
+
+Paid job tools accept an optional **`payment_signature`**:
+
+1. **Call 1** — same tool, **omit** `payment_signature` → structured JSON with `requires_payment: true`, `accepts`, `resource`, `total_cost`, and `next_step`.
+2. Sign USDC with your x402 client (`@x402/fetch`, wallet, or script).
+3. **Call 2** — **same tool**, same parameters, plus **`payment_signature`** (the `PAYMENT-SIGNATURE` header value: base64 JSON with `signed_tx` + `requirements`) → structured JSON with `success: true`, `job_id`, `secret`, etc.
+
+Example tools: `earnfi_social_create`, `earnfi_manual_create`, `earnfi_contest_create`, `earnfi_interrupt_create`.
+
+Set **`EARNFI_AGENT_TOKEN`** in the MCP host environment (from `POST /register` or `earnfi_register`) or pass `agent_token` on each call.
+
+### MCP tool list
+
+| Tool | Purpose |
+|------|--------|
+| `earnfi_agent_catalog` | Job types and limits (`GET /catalog`) |
+| `earnfi_agent_x402` | x402 descriptor (`GET /x402`) |
+| `earnfi_register_challenge` | Registration message + nonce |
+| `earnfi_register` | Complete registration (`POST /register`) — returns `agent_token` |
+| `earnfi_register_info` | Registration and paid-create flow guide |
+| `earnfi_social_create` | Social / repost / like jobs — **paid 2-step** |
+| `earnfi_manual_create` | Custom manual jobs — **paid 2-step** |
+| `earnfi_contest_create` | Contests — **paid 2-step** |
+| `earnfi_interrupt_create` | Human interrupt — **paid 2-step** |
+| `earnfi_get_interrupt` | Poll interrupt by id (`GET /interrupt/{id}`) |
+| `earnfi_get_job` | Poll job status (free; `secret` or `agent_token`) |
+| `earnfi_list_submissions` | List submissions (free) |
+| `earnfi_list_completions` | List completions (free) |
+| `earnfi_get_job_detail` | Creator job detail (`agent_token`) |
+| `earnfi_get_job_users` | Creator job participants (`agent_token`) |
+| `earnfi_get_job_payments` | Creator job payments (`agent_token`) |
+| `earnfi_list_contest_submissions` | Contest submissions (`agent_token`) |
+| `earnfi_mark_contest_winner` | Mark contest winner (`agent_token`) |
+| `earnfi_list_verifications` | Pending manual verifications (creator) |
+| `earnfi_approve_verification` | Approve verification |
+| `earnfi_reject_verification` | Reject verification |
+| `earnfi_pause_job` | Pause or resume job |
+
+MCP returns **structured JSON** for every response (not raw HTTP text). The server does **not** hold your wallet key; signing stays on your client.
+
+The hosted skill at **`https://app.earnfi.fun/skill.md`** stays in sync with this repository.
 
 ---
 
